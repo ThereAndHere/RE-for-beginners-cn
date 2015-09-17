@@ -180,16 +180,16 @@ main:
 
 Intel和AT&T语法的一些主要区别在于：
 
-* 源和目的操作数的位置相反。
-Intel语法：<指令> <目的操作数> <源操作数>
-AT&T 语法：<指令> <源操作数> <目的操作数>
-有一个简单的方法可以记住这个区别：当你使用Intel语法时，你可以想象两个操作数之间有一个等号(=)，当你使用AT&T语法时则可以想象成右箭头(→)。
+* 源和目的操作数的位置相反。  
+Intel语法：<指令> <目的操作数> <源操作数>  
+AT&T 语法：<指令> <源操作数> <目的操作数>  
+有一个简单的方法可以记住这个区别：当你使用Intel语法时，你可以想象两个操作数之间有一个等号(=)，当你使用AT&T语法时则可以想象成右箭头(→)。  
 * AT&T：在寄存器名字前必须有百分号(%)，数字前有美元符号($)。圆括号代替了方括号。
-* AT&T：指令要添加后缀表示操作数的大小：
-> – q — quad (64 bits)
-– l — long (32 bits)
-– w — word (16 bits)
-– b — byte (8 bits)
+* AT&T：指令要添加后缀表示操作数的大小：  
+> – q — quad (64 bits)  
+– l — long (32 bits)  
+– w — word (16 bits)  
+– b — byte (8 bits)  
 
 让我们回到编译后的结果：和我们在IDA中看到的相同。只有一个微妙的区别：0FFFFFFF00h被写成了$-16，他们是相同的：10进制的16在16进制中为0x10。-0x10等于0xFFFFFFF0（对于32位数据类型来说）。
 
@@ -212,4 +212,107 @@ main PROC
     add rsp, 40
     ret 0
 main ENDP
+```
+
+在x86-64中，所有寄存器被扩展到64位，他们的名字都使用R-前缀。为了更少地使用栈（或者说更少地访问外部存储/缓存），有一个流行的方法来通过寄存器传递参数。也就是说，一部分函数参数通过寄存器传递，剩下的才使用栈。在Win64中，4个函数参数使用RCX, RDX, R8, R9寄存器传递。我们可以看到，printf()中指向字符串的指针不用栈传递而是使用RCX寄存器。
+
+现在指针变为64位了，所以他们通过64位寄存器（R-前缀）传递。但是，为了向后兼容，同样还是可以访问32位的部分，使用E-前缀。
+
+这就是x86-64中的 RAX/EAX/AX/AL:
+
+main()函数返回一个整数类型的值(int)，在C/C++中，为了保持向后兼容和可移植性，依然还是32位，所以这就是为什么EAX在函数最后被清空而不是RAX。
+
+本地栈上还有40字节被分配，这叫做 "shadow space"，这将在后面讨论。
+
+###3.2.2 GCC-x86-64
+
+我们再试下64位Linux中的GCC
+
+```
+.string "hello, world\n"
+main:
+    sub rsp, 8
+    mov edi, OFFSET FLAT:.LC0 ; "hello, world\n"
+    xor eax, eax ; number of vector registers passed
+    call printf
+    xor eax, eax
+    add rsp, 8
+    ret
+```
+
+使用寄存器传递参数的方法同样应用在Linux, BSD和Mac OS X中。前6个参数通过RDI, RSI, RDX, RCX, R8, R9传递，其他则通过栈传递。
+
+所以指向字符串的指针在EDI（寄存器的32位部分）中传递。但为什么不使用64位部分RDI呢?
+
+有很重要的一点需要记住，在64位模式中，所有的MOV指令会写入寄存器的低32位，同时也会清空高32位。也就是说，`MOV EAX, 011223344h`会正确地写入RAX寄存器，因为高位会被清空。
+
+如果我们打开已编译的对象文件(.o)，我们也可以看到所有指令的操作码：
+
+```
+.text:00000000004004D0 					main proc near
+.text:00000000004004D0 48 83 EC 08 		sub rsp, 8
+.text:00000000004004D4 BF E8 05 40 00 	mov edi, offset format ; "hello, world\n"
+.text:00000000004004D9 31 C0 			xor eax, eax
+.text:00000000004004DB E8 D8 FE FF FF 	call _printf
+.text:00000000004004E0 31 C0 			xor eax, eax
+.text:00000000004004E2 48 83 C4 08 		add rsp, 8
+.text:00000000004004E6 C3 				retn
+.text:00000000004004E6 					main endp
+```
+
+我们可以看到，在0x4004D4上的指令写入EDI占用5字节，同样的指令写入64位的值到RDI占用7字节。显然，GCC会尝试节省空间，此外，它可以确信包含字符串的数据段不会被分配到4GiB以上。
+
+我们还可以看到EAX寄存器在调用printf()函数前被清空。这是因为使用向量寄存器的数量会通过EAX传递。
+
+##3.3 GCC-还有一件事
+
+匿名的C字符串有着const属性，而且分配在常数短的C字符串是保证不可变的，所以有一个有趣的结果：编译器会使用字符串的特定部分。
+
+我们试一下下面这个例子：
+
+```cpp
+#include <stdio.h>
+
+int f1()
+{
+	printf ("world\n");
+}
+
+int f2()
+{
+	printf ("hello world\n");
+}
+
+int main()
+{
+	f1();
+	f2();
+}
+```
+
+一般的C/C++编译器（包括MSVC）分配两个字符串，但我们来看看GCC 4.8.1是怎么做的：
+
+```
+f1 			proc near
+
+s 			= dword ptr -1Ch
+			sub esp, 1Ch
+			mov [esp+1Ch+s], offset s ; "world\n"
+            call _puts
+            add esp, 1Ch
+			retn
+f1 			endp
+
+f2 			proc near
+
+s 			= dword ptr -1Ch
+            sub esp, 1Ch
+            mov [esp+1Ch+s], offset aHello ; "hello "
+            call _puts
+            add esp, 1Ch
+            retn
+f2 			endp
+
+aHello 		db 'hello '
+s 			db 'world',0xa,0
 ```
