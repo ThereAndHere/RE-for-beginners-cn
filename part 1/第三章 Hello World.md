@@ -317,3 +317,45 @@ f2 			endp
 aHello 		db 'hello '
 s 			db 'world',0xa,0
 ```
+
+实际上：当我们打印字符串“hello world”，这两个单词放在内存相邻的位置，f2()函数调用的puts()并不在意字符串是分开的。实际上它并不是分开的，只是“无形中”分开了。
+
+当f1()调用puts()，它使用了“world”字符串加零字节。puts()并不在意字符串之前还有什么。
+
+这个聪明的技巧在最新的GCC中经常被使用并且能节省一些内存。
+
+
+##3.4 ARM
+
+为了在ARM处理器上实验，需要用到几个编译器：
+* 在嵌入式领域著名的 Keil Release 6/2013
+* 苹果Xcode 4.6.3 IDE(LLVM-GCC 4.2 编译器)
+* GCC 4.9 (Lianro)(for ARM64)
+
+如果没有特别的说明，本书所有的例子都使用32位ARM代码（包括Thumb和Thumb-2模式）。当我们谈论64位ARM时，会把它称为ARM64。
+
+###3.4.1 无优化的 Keil 6/2013(ARM 模式)
+
+让我们在Keil中编译我们的例子：
+
+```
+armcc.exe --arm --c90 -O0 1.c
+```
+
+armcc编译器使用intel语法生成汇编清单，但包含了许多高层次的ARM处理器相关的宏。但对我们更重要的是指令“原来”的样子，所以让我们看看IDA里反编译的结果。
+
+```
+.text:00000000 main
+.text:00000000 10 40 2D E9 STMFD SP!, {R4,LR}
+.text:00000004 1E 0E 8F E2 ADR R0, aHelloWorld ; "hello, world"
+.text:00000008 15 19 00 EB BL __2printf
+.text:0000000C 00 00 A0 E3 MOV R0, #0
+.text:00000010 10 80 BD E8 LDMFD SP!, {R4,PC}
+.text:000001EC 68 65 6C 6C+aHelloWorld DCB "hello, world",0 ; DATA XREF: main+4
+```
+
+在这个例子里，我们能容易地发现每个指令都是4字节。的确，我们只用ARM模式编译而不是Thumb。
+
+最开始的指令`STMFD SP!, {R4,LR}`,相当于x86的`PUSH`指令，将两个寄存器里（R4 和 LR）的值放入栈中。在armcc编译器的输出清单中，为了简单起见，确实显示了`PUSH {r4, lr}`指令。但这是不准确的。`PUSH`指令只有在Thumb模式中才会出现。所以为了避免混淆，我们使用IDA的结果。
+
+这条指令首先减小了SP的值使它指向栈里空闲的位置。
